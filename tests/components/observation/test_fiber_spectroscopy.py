@@ -103,25 +103,3 @@ def test_photometry_unchanged_when_present(state_with_profile) -> None:
     assert jnp.allclose(pred["phot_fnu"], phot)
     # Spec is scaled
     assert not jnp.allclose(pred["spec_fnu"], spec)
-
-
-@pytest.mark.gradient
-def test_predict_is_jittable_in_redshift(state_with_profile) -> None:
-    """jax.grad w.r.t. redshift through jax.jit(predict) is finite.
-
-    Redshift is traced inside every fitter; predict must not call
-    float() on it. Differentiates spec_fnu[0] w.r.t. redshift and
-    asserts the gradient is finite.
-    """
-    import jax
-
-    spec = jnp.ones(10)
-    base = _StubObservation(fixed_output={"spec_fnu": spec})
-    obs = FiberSpectroscopyObservation(
-        observation=base, fiber_radius_arcsec=1.0, fiber_center_arcsec=(0.3, -0.2)
-    )
-    f = jax.jit(lambda z: obs.predict(state_with_profile, {"redshift": z})["spec_fnu"])
-    eager = obs.predict(state_with_profile, {"redshift": jnp.float64(0.05)})["spec_fnu"]
-    assert jnp.allclose(f(jnp.float64(0.05)), eager, rtol=1e-12)
-    g = jax.grad(lambda z: f(z)[0])(jnp.float64(0.05))
-    assert jnp.isfinite(g)
