@@ -9,6 +9,8 @@ of a banded LSF so the deconvolution (and tests of it) can be checked in
 physical units.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -22,6 +24,17 @@ from tengri.observation.banded import (
 
 C = 299792.458
 WAVE = np.arange(5000.0, 5000.0 + 0.8 * 2000, 0.8)
+
+
+def _gaussian_bm_with_zeroed_edges(n_edge=5):
+    """A Gaussian resolution matrix with its first/last ``n_edge`` columns
+    zeroed out, standing in for the masked/edge pixels a real DESI
+    resolution matrix carries."""
+    bm = gaussian_resolution_bands(WAVE, 3000.0, n_diag=41)
+    data = np.array(bm.data)
+    data[:, :n_edge] = 0.0
+    data[:, -n_edge:] = 0.0
+    return BandedMatrix(offsets=bm.offsets, data=data), bm, n_edge
 
 
 @pytest.mark.limit
@@ -97,3 +110,46 @@ def test_preserves_normalization_and_centroid_nongaussian():
     c_in = (offs[:, None] * data).sum(0)
     c_out = (offs[:, None] * d).sum(0)
     np.testing.assert_allclose(c_out, c_in, atol=2e-3)
+
+
+@pytest.mark.bounds
+def test_deconvolve_handles_zero_sum_rows():
+    """Bound: deconvolve_library_lsf output must be finite everywhere, even
+    with zero-sum rows (masked/edge pixels, which real DESI resolution
+    matrices carry). A zero-sum row has no LSF to deconvolve, so it must stay
+    exactly zero (not NaN from a 0/0 renormalization) -- and because each
+    row's second-order correction and renormalization only touch that row's
+    own column, zeroing the edges must not perturb the interior rows at all.
+    """
+    sig_R = C / (2.3548 * 3000.0)
+    bm_masked, bm_full, n_edge = _gaussian_bm_with_zeroed_edges()
+
+    out_masked = deconvolve_library_lsf(bm_masked, WAVE, 0.3 * sig_R)
+    out_full = deconvolve_library_lsf(bm_full, WAVE, 0.3 * sig_R)
+    d_masked = np.asarray(out_masked.data)
+    d_full = np.asarray(out_full.data)
+
+    assert np.all(np.isfinite(d_masked))
+    np.testing.assert_array_equal(d_masked[:, :n_edge], 0.0)
+    np.testing.assert_array_equal(d_masked[:, -n_edge:], 0.0)
+    np.testing.assert_allclose(
+        d_masked[:, n_edge:-n_edge], d_full[:, n_edge:-n_edge], rtol=0, atol=0
+    )
+
+
+@pytest.mark.limit
+def test_row_sigma_zero_sum_row_is_nan_without_warning():
+    """Limit: a zero-sum row has no normalized weight, so row_sigma_kms must
+    return NaN there (the width of an empty/masked row is undefined) rather
+    than raising RuntimeWarning from a 0/0 division -- the zero-sum columns
+    must be routed around the division entirely, not merely suppressed.
+    """
+    bm_masked, _, n_edge = _gaussian_bm_with_zeroed_edges()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        s = row_sigma_kms(bm_masked, WAVE)
+
+    assert np.all(np.isnan(s[:n_edge]))
+    assert np.all(np.isnan(s[-n_edge:]))
+    assert np.all(np.isfinite(s[n_edge:-n_edge]))
