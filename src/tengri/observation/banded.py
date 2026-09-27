@@ -274,3 +274,138 @@ def gaussian_resolution_bands(wave_obs: jnp.ndarray, resolution, n_diag: int = 1
         data[k, :] = np.exp(-0.5 * (o / sigma_pix) ** 2)
     data /= data.sum(axis=0, keepdims=True)  # normalize per output pixel
     return BandedMatrix(offsets=jnp.asarray(offsets), data=jnp.asarray(data))
+
+
+def row_sigma_kms(bm: BandedMatrix, wave_obs: jnp.ndarray) -> np.ndarray:
+    r"""Gaussian-equivalent velocity width of each row of a banded LSF [km/s].
+
+    Second central moment of row :math:`i` over its diagonal offsets,
+
+    .. math::
+
+        \sigma_{\mathrm{pix}, i}^2 = \sum_k w_{k,i} (o_k - \mu_i)^2, \qquad
+        \mu_i = \sum_k w_{k,i} o_k, \qquad w_{k,i} = \frac{\mathrm{data}[k, i]}
+        {\sum_{k'} \mathrm{data}[k', i]}
+
+    with :math:`o_k` the diagonal offsets, converted to velocity with the
+    local :math:`\mathrm{d}\ln\lambda` (exact on linear DESI grids, following
+    the same per-pixel-scale convention as :func:`gaussian_resolution_bands`):
+    :math:`\sigma_{v, i} = \sigma_{\mathrm{pix}, i} \, \mathrm{d}\ln\lambda_i
+    \, c`.
+
+    Parameters
+    ----------
+    bm : BandedMatrix
+        Banded LSF operator, ``data`` shape ``(K, n_pix)``.
+    wave_obs : array_like, shape (n_pix,)
+        Observed wavelength grid [Angstrom].
+
+    Returns
+    -------
+    ndarray, shape (n_pix,)
+        Per-row Gaussian-equivalent velocity width [km/s].
+
+    Notes
+    -----
+    Build-time NumPy helper; not traced. A row need not itself be Gaussian —
+    this returns the second-moment-equivalent width regardless of shape, which
+    is exact only when the row is Gaussian (used that way by
+    :func:`deconvolve_library_lsf`).
+    """
+    offs = np.asarray(bm.offsets, dtype=float).ravel()
+    d = np.asarray(bm.data, dtype=float)
+    w = d / d.sum(axis=0, keepdims=True)
+    mu = (offs[:, None] * w).sum(0)
+    var = ((offs[:, None] - mu) ** 2 * w).sum(0)
+    dln = np.gradient(np.log(np.asarray(wave_obs, dtype=float)))
+    return np.sqrt(var) * dln * _C_KM_S
+
+
+def deconvolve_library_lsf(
+    bm: BandedMatrix, wave_obs: jnp.ndarray, sigma_lib_kms, max_ratio: float = 0.6
+) -> BandedMatrix:
+    r"""Remove a Gaussian library LSF from a resolution matrix.
+
+    :math:`R' \otimes G_{\sigma_{lib}} \approx R`.
+
+    SSP spectra already carry the stellar library's resolution
+    :math:`\sigma_{\mathrm{lib}}`; applying the instrument resolution matrix on
+    top of a library-resolution model double-counts it. For each row this
+    applies the second-order inverse of a Gaussian convolution along the
+    diagonal index,
+
+    .. math::
+
+        R'[i, k] = R[i, k] - \frac{s_i^2}{2}\left(R[i, k+1] - 2 R[i, k]
+        + R[i, k-1]\right), \qquad s_i = \frac{\sigma_{\mathrm{lib}, i}}
+        {c \, \mathrm{d}\ln\lambda_i}
+
+    with :math:`s_i` the library width in pixels, then renormalizes each row
+    to its original sum. This keeps the row's non-Gaussian shape, centroid,
+    and normalization; it is the standard finite-difference approximation of
+    deconvolution by a narrow Gaussian kernel (second-order Taylor expansion
+    of the convolution operator in the kernel width).
+
+    Parameters
+    ----------
+    bm : BandedMatrix
+        Banded resolution matrix ``R`` at library-and-instrument combined
+        resolution, ``data`` shape ``(K, n_pix)``, with contiguous integer
+        diagonal offsets (e.g. ``-5, -4, ..., 5``).
+    wave_obs : array_like, shape (n_pix,)
+        Observed wavelength grid [Angstrom].
+    sigma_lib_kms : float or array_like, shape (n_pix,)
+        Stellar library's Gaussian LSF width to remove [km/s]. ``0`` (scalar
+        or every element) returns ``bm`` unchanged.
+    max_ratio : float, optional
+        Refuse rows where :math:`\sigma_{\mathrm{lib}} / \sigma_{\mathrm{row}}`
+        exceeds this. Default 0.6.
+
+    Returns
+    -------
+    BandedMatrix
+        ``R'``, the resolution matrix with the library LSF removed, same
+        offsets and shape as ``bm``.
+
+    Raises
+    ------
+    ValueError
+        If ``bm.offsets`` are not contiguous integers, or if any row has
+        ``sigma_lib / sigma_row > max_ratio``: no correct model can be
+        narrower than its library (e.g. MILES at ~70 km/s against DESI's
+        25-40 km/s r/z arms), and the second-order expansion this function
+        relies on is only valid for a library width small against the row it
+        is being removed from.
+
+    Notes
+    -----
+    Build-time NumPy helper; not traced. Usage contract: the model evaluated
+    pre-``R`` is at library resolution, so pass
+    ``resolution_matrix=deconvolve_library_lsf(R, wave, sigma_lib)`` together
+    with ``sigma_lib_kms=0.0`` to :func:`~tengri.observation.spectrum.project_spectrum`
+    (which applies velocity broadening before ``R @ model``), rather than
+    letting ``R`` apply the instrument LSF on top of the library's.
+    """
+    offs = np.asarray(bm.offsets).ravel()
+    order = np.argsort(offs)
+    if not np.array_equal(offs[order], np.arange(offs.min(), offs.max() + 1)):
+        raise ValueError("deconvolve_library_lsf needs contiguous diagonal offsets")
+    d = np.asarray(bm.data, dtype=float)[order]
+    wave = np.asarray(wave_obs, dtype=float)
+    lib = np.broadcast_to(np.asarray(sigma_lib_kms, dtype=float), wave.shape)
+    if np.all(lib == 0):
+        return bm
+    ratio = lib / row_sigma_kms(bm, wave)
+    if np.nanmax(ratio) > max_ratio:
+        raise ValueError(
+            f"library LSF too broad for this resolution matrix: max sigma_lib/sigma_row = "
+            f"{np.nanmax(ratio):.2f} > {max_ratio}; use a higher-resolution library "
+            f"(e.g. C3K R10K)"
+        )
+    s_pix = lib / _C_KM_S / np.gradient(np.log(wave))
+    pad = np.pad(d, ((1, 1), (0, 0)))
+    second = pad[2:] - 2.0 * pad[1:-1] + pad[:-2]
+    out = d - 0.5 * s_pix[None, :] ** 2 * second
+    out *= d.sum(axis=0, keepdims=True) / out.sum(axis=0, keepdims=True)
+    inv = np.argsort(order)
+    return BandedMatrix(offsets=bm.offsets, data=jnp.asarray(out[inv]))
