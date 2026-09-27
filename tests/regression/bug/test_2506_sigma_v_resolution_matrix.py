@@ -10,7 +10,7 @@ import tengri  # noqa: F401  (float64)
 from tengri.observation.banded import gaussian_resolution_bands
 from tengri.observation.spectrum import project_spectrum
 
-pytestmark = pytest.mark.contract
+pytestmark = pytest.mark.regression_bug
 
 C_KMS = 299792.458
 
