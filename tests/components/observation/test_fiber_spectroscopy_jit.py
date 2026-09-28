@@ -68,4 +68,9 @@ def test_predict_is_jittable_in_redshift(state_with_profile) -> None:
     eager = obs.predict(state_with_profile, {"redshift": jnp.float64(0.05)})["spec_fnu"]
     assert jnp.allclose(f(jnp.float64(0.05)), eager, rtol=1e-12)
     g = jax.grad(lambda z: f(z)[0])(jnp.float64(0.05))
-    assert jnp.isfinite(g)
+    assert jnp.isfinite(g), "predict's redshift gradient must not be NaN/inf under jit"
+    assert g != 0.0, (
+        "redshift moves the fiber centre in kpc (arcsec_to_kpc) and therefore the "
+        "aperture-weighted flux; a gradient of exactly zero here would mean the "
+        "traced fiber centre silently stopped influencing the output"
+    )
