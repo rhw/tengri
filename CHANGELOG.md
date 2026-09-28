@@ -10,6 +10,12 @@
   fiber centre stays a traced array instead of being concretized via `float()`,
   which previously raised `ConcretizationTypeError` whenever `predict` was
   wrapped in `jax.jit` or differentiated with respect to redshift.
+- `sigma_v_kms` is now applied on the resolution-matrix branch of `project_spectrum`
+  (previously silently skipped there, so intrinsic galaxy velocity dispersion had
+  zero effect and zero gradient on the DESI spectroscopy path). `observation/banded.py`
+  gains `row_sigma_kms` and `deconvolve_library_lsf` to remove the SSP library's LSF
+  from a banded resolution matrix before it is applied, so the library and DESI
+  resolution contributions are not double-counted (#2506).
 - A `Fixed` redshift now reaches the emission-line paths the same way it reaches
   photometry. Under `WavePrecomp(catalog_z_range=...)` the build keeps redshift out
   of the compiled kernel (so `model.z_fixed` is `None` by design), and
