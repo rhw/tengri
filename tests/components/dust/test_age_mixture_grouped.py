@@ -166,6 +166,68 @@ def test_grouped_matches_per_node_attenuated_sed_and_energy_balance(
     assert _max_rel(lnu_int.sum(axis=0), np.asarray(s0.derived["lnu_age"]).sum(axis=0)) <= RTOL
 
 
+def test_grouped_matches_per_node_under_vmap(synthetic_ssp_wide, synthetic_tophat_obs):
+    """Same identity batched with jax.vmap (where XLA CPU once miscompiled a short dot_general).
+
+    Four points (the three of the gradient test plus one more) in one vmapped value_and_grad:
+    grouped vs per_node, and grouped batched vs grouped point by point, to 1e-12.
+    """
+    m0 = _synthetic_model(synthetic_ssp_wide, synthetic_tophat_obs, 0.3, "per_node")
+    m1 = _synthetic_model(synthetic_ssp_wide, synthetic_tophat_obs, 0.3, "grouped")
+    pts = [*_SYNTH_POINTS, dict(_SYNTH_POINTS[1], sfh_delayed_age_gyr=0.03, dust_tau_bc=0.2)]
+    batch = {k: jnp.asarray([p[k] for p in pts], jnp.float64) for k in pts[0]}
+
+    def batched(model):
+        f = jax.vmap(jax.value_and_grad(lambda q: _synthetic_objective(model, q)))
+        return jax.jit(f)(batch)
+
+    (v0, g0), (v1, g1) = batched(m0), batched(m1)
+    assert _max_rel(v1, v0) <= RTOL
+    for k in g0:
+        np.testing.assert_allclose(
+            np.asarray(g1[k]), np.asarray(g0[k]), rtol=RTOL, atol=0, err_msg=k
+        )
+    for i, p in enumerate(pts):
+        v, g = _value_and_grad(m1, _synthetic_objective, p)
+        assert abs(float(v) - float(v1[i])) <= RTOL * abs(float(v)), i
+        for k in g:
+            assert abs(float(g[k]) - float(g1[k][i])) <= RTOL * abs(float(g[k])), (i, k)
+
+
+def test_grouped_without_stellar_interval_spectra_warns_and_agrees(
+    synthetic_ssp_wide, synthetic_tophat_obs
+):
+    """Stellar without lnu_interval (hand-built chain): exact fallback, one warning."""
+    from dataclasses import replace
+
+    from tengri.components.dust import two_component
+    from tengri.components.stellar.component import StellarSEDComponent
+    from tengri.forward.orchestrator import slice_params_for_component
+    from tengri.parameters.resolve import merge_fixed_params
+    from tengri.protocols import ForwardState
+
+    m0 = _synthetic_model(synthetic_ssp_wide, synthetic_tophat_obs, 0.3, "per_node")
+    m1 = _synthetic_model(synthetic_ssp_wide, synthetic_tophat_obs, 0.3, "grouped")
+    # Applied component by component (run_components would wire the flag back on).
+    chain = [
+        replace(c, config=replace(c.config, publish_interval_spectra=False))
+        if isinstance(c, StellarSEDComponent)
+        else c
+        for c in m1._build_component_chain()
+    ]
+    p = {k: jnp.asarray(v) for k, v in _SYNTH_POINTS[1].items()}
+    full = merge_fixed_params(m1.spec, p)
+    s1 = ForwardState(wave=m1._rest_wavelength, sed_observed=jnp.ones_like(m1._rest_wavelength))
+    two_component._GROUPED_FALLBACK_WARNED.clear()
+    with pytest.warns(UserWarning, match="lnu_interval"):
+        for c in chain:
+            s1 = c.apply(s1, slice_params_for_component(c, full))
+    assert "lnu_interval" not in s1.derived
+    s0 = m0.predict_state(p)
+    for key in ("sed_dust_attenuated", "L_absorbed"):
+        assert _max_rel(s1.derived[key], s0.derived[key]) <= RTOL, key
+
+
 def test_age_mixture_default_is_per_node(synthetic_ssp_wide, synthetic_tophat_obs):
     """Leaving ``age_mixture`` unset is the per-node path, bit for bit, and one compiled kernel."""
     m_default = _synthetic_model(synthetic_ssp_wide, synthetic_tophat_obs, 0.3, None)
