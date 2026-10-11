@@ -39,6 +39,7 @@ template-grid HDF5 loading happens on first invocation.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar
@@ -221,6 +222,23 @@ def _screen_transmission(
     f_obsc = jnp.asarray(f_obsc)
     return f_obsc + (1.0 - f_obsc) * jnp.exp(-tau)
 
+
+def _warn_grouped_fallback() -> None:
+    """Warn (once per process) that grouped dust is regrouping the per-age cube itself."""
+    if _GROUPED_FALLBACK_WARNED:
+        return
+    _GROUPED_FALLBACK_WARNED.append(True)
+    warnings.warn(
+        "DustSEDComponent(age_mixture='grouped'): the stellar component did not publish "
+        "'lnu_interval' (StellarSEDComponentConfig.publish_interval_spectra is off: the chain "
+        "was applied component by component, not through tengri.forward.run_components, "
+        "which wires it), so the interval spectra are summed from the per-age cube. The "
+        "result is exact; the speedup is lost.",
+        stacklevel=3,
+    )
+
+
+_GROUPED_FALLBACK_WARNED: list[bool] = []
 
 #: Evaluation orders of the two-component age mixture
 #: (:attr:`DustSEDComponentConfig.age_mixture`).
@@ -1278,8 +1296,10 @@ class DustSEDComponent(TemplateThreading):
         if grouped:
             lnu_int = state.derived.get("lnu_interval")
             if lnu_int is None or jnp.shape(lnu_int)[0] != fractions.shape[0]:
-                # A chain whose stellar component was not asked for them (hand
-                # built without wire_age_boundaries): same sums from the cube.
+                # A chain whose stellar component was not asked for them (applied
+                # outside run_components, so never wired): same sums from the cube,
+                # exact, but the per-age cube is formed and the speedup is lost.
+                _warn_grouped_fallback()
                 lnu_int = interval_sums(fractions, lnu_age)
             lnu_int = jnp.asarray(lnu_int)  # (n_interval, n_wave)
             sed_attenuated = contract_intervals(t_int, lnu_int)
@@ -1831,10 +1851,12 @@ class DustSEDComponent(TemplateThreading):
         # ── 4. Combine stellar + nebular SEDs (emission handled by components) ─
         # Preserve any non-stellar contribution that may have been added
         # to ``sed_intrinsic`` by an upstream component (e.g. AGN,
-        # Nebular). The stellar contribution at this point equals
-        # ``sum(lnu_age, axis=0)`` exactly (Stellar is the only producer
-        # of ``lnu_age``), so ``state.sed_intrinsic - sed_intrinsic_stellar``
-        # isolates the non-stellar portion. Stellar dust does not attenuate
+        # Nebular). The stellar contribution at this point is what Stellar
+        # published as its SED: ``sum(lnu_age, axis=0)`` under ``per_node``,
+        # ``sum(lnu_interval, axis=0)`` under ``grouped`` (the same sum
+        # regrouped; equal to reassociation). ``sed_intrinsic_stellar`` is
+        # formed the same way in each mode, so ``state.sed_intrinsic -
+        # sed_intrinsic_stellar`` isolates the non-stellar portion. Stellar dust does not attenuate
         # AGN/nebular/radio/xray.
         #
         # IR re-emission is now handled by separate dust emission components

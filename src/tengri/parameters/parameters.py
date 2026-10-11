@@ -1386,11 +1386,12 @@ class Parameters:
         # Evaluation order of the two-component age mixture: 'per_node'
         # (default) or 'grouped' (the exact interval-sum regrouping). Same
         # validation as the grammar layer, repeated for the flat surface.
+        from tengri.components.dust.two_component import AGE_MIXTURES
+
         self.dust_age_mixture = str(kwargs.pop("dust_age_mixture", "per_node"))
-        if self.dust_age_mixture not in ("per_node", "grouped"):
+        if self.dust_age_mixture not in AGE_MIXTURES:
             raise ValueError(
-                f"dust_age_mixture={self.dust_age_mixture!r} must be one of "
-                f"('per_node', 'grouped')."
+                f"dust_age_mixture={self.dust_age_mixture!r} must be one of {AGE_MIXTURES}."
             )
         if self.dust_age_mixture != "per_node" and self.dust_model != "two_component":
             raise ValueError(
