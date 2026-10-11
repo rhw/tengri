@@ -151,6 +151,9 @@ SIGNATURE_POLICY: KeyPolicy = {
     "_dust_lyc_escape_geometry": content(
         "age-selective LyC escape geometry (#2529) changes the dust screen"
     ),
+    "_dust_age_mixture": content(
+        "per_node vs grouped two-component age mixture: same values, different graph"
+    ),
     "_dust_ir_diffuse_screen": content("diffuse-screen pass changes the emitted IR SED"),
     "_astrodust_spinning_dust": content("astrodust AME enable flag changes the emitted SED"),
     "_astrodust_f_cnm": content("astrodust cold-neutral-medium filling fraction"),
