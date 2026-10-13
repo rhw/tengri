@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- **The local-path guard checks symlink targets (#2784).** `tools/check_no_local_paths.py` skipped every tracked symlink, so a link whose target was an absolute home path (`/Users/<name>/...` or `/home/<name>/...`) passed, and a broken link was skipped outright. A link's target string is now matched with the same pattern and allowlist, without following the link into its content; broken links are checked too.
 - **Traced wavelength grids and runtime redshifts take the general path (#2847, #2858).** Under `jit`, a traced `wave_obs` no longer uses the single constant-R FFT, which is only correct on a log-uniform grid, so a linear grid is broadened correctly. `velocity_broaden` now routes a traced grid to the piecewise general path instead of raising, matching the eager result to 3e-10 relative on a log grid and 1e-8 on a linear grid. A catalog redshift is runtime in spectroscopy, so a placeholder `Fixed` value no longer overwrites the photometry redshift spec, and a free `sigma_v_kms` or `lsf_scale` missing from `params` raises rather than defaulting to no broadening.
 - **The monolithic and composable GRAHSP paths share one converged own-grid disc integral (#2839).** The monolithic `grahsp` path integrated the SBPL disc on its own 1024-node log-trapezoid grid, 2.8e-6 (relative) away from the dense reference and from the composable disc block. Both now call `bolometric_unit_nm` in `grahsp/publication.py` (the publication-grid Gauss-Legendre integral) through `grahsp/normalization.py`; the Netzer disc is unchanged in value.
 
