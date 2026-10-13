@@ -52,7 +52,8 @@ ALLOWLIST: dict[str, str] = {
     "components/agn/blocks/torus_library_transmission.py::_below_library_index": (
         "tracer → None; the caller (library sightline) then evaluates the X-ray absorption on "
         "the whole grid with a where-select below the library's first node — the original dense, "
-        "exact general path; the static index set is only an optimization for a concrete build grid."
+        "exact general path; the static index set is only an optimization for a concrete build "
+        "grid."
     ),
     "components/agn/blr.py::_fe2_is_concrete_narrow": (
         "traced FWHM takes the band-limited path, valid for FWHM >= 500 km/s only; a traced "
