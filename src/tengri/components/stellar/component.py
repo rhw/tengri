@@ -2773,10 +2773,15 @@ class StellarSEDComponent:
         # ``ssp_flux`` that DSPS sees differs.
         _alpha_collapse_active = has_alpha_grid(ssp)
         if _alpha_collapse_active:
+            # Do NOT materialize the collapsed cube here: under vmap over samples (K chains) and reverse-mode AD a
+            # per-sample (n_met, n_age, n_wave) copy is what runs a 128-chain gradient out of GPU memory (26.75 GiB
+            # at 12 x 107 x 10824 float64). The CSP einsums below contract the 4D cube over metallicity per
+            # [alpha/Fe] node and interpolate the small (n_alpha, n_age, n_wave) result with these weights instead;
+            # the cube stays a shared constant.
+            from tengri.components.stellar.sps.dsps_wrapper import alpha_bracket
             _alpha_fe_value = jnp.asarray(params.get("met_alpha_fe", _ALPHA_FE_DEFAULT))
-            ssp_flux_for_csp = interpolate_alpha_only(
-                ssp.ssp_flux, ssp.ssp_alpha_fe, _alpha_fe_value
-            )
+            _alpha_ia, _alpha_fa = alpha_bracket(ssp.ssp_alpha_fe, _alpha_fe_value)
+            ssp_flux_for_csp = ssp.ssp_flux  # 4D (n_met, n_alpha, n_age, n_wave); collapsed after each contraction
         else:
             ssp_flux_for_csp = ssp.ssp_flux
 
@@ -2788,8 +2793,10 @@ class StellarSEDComponent:
         # ``ssp_flux_for_csp`` is 3-D here (an alpha-enhanced cube was collapsed
         # above); the ratio is independent of [alpha/Fe], so applying it after
         # the collapse equals applying it before.
-        _agb_dust_cube = self._agb_dust_cube_ratio(params, ssp_flux_for_csp)
+        _agb_dust_cube = self._agb_dust_cube_ratio(params, ssp_flux_for_csp[:, 0] if _alpha_collapse_active else ssp_flux_for_csp)
         if _agb_dust_cube is not None:
+            if _alpha_collapse_active:
+                raise NotImplementedError("a free AGB dust-shell weight on a 4D [alpha/Fe] SSP grid is not supported yet")
             ssp_flux_for_csp = ssp_flux_for_csp * _agb_dust_cube
 
         if self.config.metallicity_model == "delta":
@@ -3102,9 +3109,15 @@ class StellarSEDComponent:
         # finite). With L_sun carried on the zero-gradient SSP constant, the only
         # Jacobians autodiff forms are ``total_mass`` (~1e10) and the erg-scaled
         # SSP (~3.8e18), both representable. Identical in float64 (#1206).
-        ssp_flux_at_age = jnp.einsum(
-            "ma,maw->aw", joint_weights, ssp_flux_for_csp * LSUN_ERG_PER_S
-        )
+        if _alpha_collapse_active:
+            from tengri.components.stellar.sps.dsps_wrapper import collapse_alpha_axis
+            ssp_flux_at_age = collapse_alpha_axis(
+                jnp.einsum("ma,mkaw->kaw", joint_weights, ssp_flux_for_csp), _alpha_ia, _alpha_fa
+            ) * LSUN_ERG_PER_S
+        else:
+            ssp_flux_at_age = jnp.einsum(
+                "ma,maw->aw", joint_weights, ssp_flux_for_csp * LSUN_ERG_PER_S
+            )
         # Per-age "mass" for downstream per-age operations (dust BC mask).
         # This is the marginalized age distribution × total_mass.
         age_weights = joint_weights.sum(axis=0) * total_mass  # (n_age,) Msun
@@ -3144,11 +3157,18 @@ class StellarSEDComponent:
             from tengri.components.dust._age_mixture import interval_fractions
 
             _fractions = interval_fractions(younger_fraction)  # (n_interval, n_age)
-            lnu_interval = total_mass * jnp.einsum(
-                "jma,maw->jw",
-                _fractions[:, None, :] * joint_weights[None, :, :],
-                ssp_flux_for_csp * LSUN_ERG_PER_S,
-            )
+            if _alpha_collapse_active:
+                from tengri.components.stellar.sps.dsps_wrapper import collapse_alpha_axis
+                lnu_interval = total_mass * LSUN_ERG_PER_S * collapse_alpha_axis(
+                    jnp.einsum("jma,mkaw->jkw", _fractions[:, None, :] * joint_weights[None, :, :], ssp_flux_for_csp),
+                    _alpha_ia, _alpha_fa, axis=1,
+                )
+            else:
+                lnu_interval = total_mass * jnp.einsum(
+                    "jma,maw->jw",
+                    _fractions[:, None, :] * joint_weights[None, :, :],
+                    ssp_flux_for_csp * LSUN_ERG_PER_S,
+                )
             sed_intrinsic = jnp.sum(lnu_interval, axis=0)
 
         # The bare erg/s scale ``total_mass x L_sun``. Written out on its own it
@@ -3268,9 +3288,15 @@ class StellarSEDComponent:
             # nebular/dust components can use log10_age_sum_lyc to combine
             # ages without dragging the full stellar SED into the
             # FeaturePrecomp graph.
-            _lnu_age_ion = jnp.einsum(
-                "ma,mai->ai", joint_weights, ssp_flux_for_csp[:, :, :_n_ion]
-            )  # shape (n_age, n_ion), per-Msun
+            if _alpha_collapse_active:
+                from tengri.components.stellar.sps.dsps_wrapper import collapse_alpha_axis
+                _lnu_age_ion = collapse_alpha_axis(
+                    jnp.einsum("ma,mkai->kai", joint_weights, ssp_flux_for_csp[:, :, :, :_n_ion]), _alpha_ia, _alpha_fa
+                )  # shape (n_age, n_ion), per-Msun
+            else:
+                _lnu_age_ion = jnp.einsum(
+                    "ma,mai->ai", joint_weights, ssp_flux_for_csp[:, :, :_n_ion]
+                )  # shape (n_age, n_ion), per-Msun
             # Q_H's age+met-marginalized ionizing SED is the age-sum of the
             # per-age slice above (both reduce the SAME joint_weights over the
             # SAME met axis; summing the age axis afterward is the met-AND-age
@@ -3750,6 +3776,8 @@ class StellarSEDComponent:
             z = jnp.asarray(require_redshift(params, "components.stellar.component.apply"))
             wave_obs_pix = jnp.asarray(self._state.ssp_spec_ztable.wave_obs_pixels)
             wave_rest = wave_obs_pix / (1.0 + z)
+            if _alpha_collapse_active:
+                raise NotImplementedError("the free-redshift spectrum table path does not support a 4D [alpha/Fe] SSP grid yet")
             n_met_s, n_age_s = ssp_flux_for_csp.shape[0], ssp_flux_for_csp.shape[1]
             flat = ssp_flux_for_csp.reshape(n_met_s * n_age_s, -1)
             interp_flat = vmap(lambda row: jnp.interp(wave_rest, wave, row, left=0.0, right=0.0))(
