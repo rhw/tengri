@@ -26,29 +26,35 @@ import numpy as np
 import pytest
 
 from tengri import DEFAULT, FREE, Fixed, SEDModel, Uniform
+from tengri.utils.cosmology import age_at_z
 
 pytestmark = pytest.mark.conservation
 
 RTOL = 1e-12
+
+# The synthetic model's redshift. Since #2954 the delayed-SFH age is the fraction
+# sfh_delayed_age_frac of age(z); the points keep their original ages in Gyr.
+_SYNTH_Z = 0.05
+_AGE_Z_GYR = float(age_at_z(_SYNTH_Z))
 
 # Young (y ~ 1 on the populated nodes), mixed (the boundary cell carries the mass),
 # and old (y ~ 0) delayed SFHs: the extreme young fractions plus the interior.
 _SYNTH_POINTS = (
     {
         "sfh_delayed_tau_gyr": 0.004,
-        "sfh_delayed_age_gyr": 0.006,
+        "sfh_delayed_age_frac": 0.006 / _AGE_Z_GYR,
         "dust_tau_bc": 1.4,
         "dust_tau_diff": 0.6,
     },
     {
         "sfh_delayed_tau_gyr": 0.02,
-        "sfh_delayed_age_gyr": 0.012,
+        "sfh_delayed_age_frac": 0.012 / _AGE_Z_GYR,
         "dust_tau_bc": 0.7,
         "dust_tau_diff": 0.3,
     },
     {
         "sfh_delayed_tau_gyr": 3.0,
-        "sfh_delayed_age_gyr": 10.0,
+        "sfh_delayed_age_frac": 10.0 / _AGE_Z_GYR,
         "dust_tau_bc": 1.9,
         "dust_tau_diff": 1.2,
     },
@@ -73,13 +79,13 @@ def _synthetic_model(ssp, obs, width, age_mixture):
         sfh={
             "type": "delayed",
             "tau_gyr": Uniform(0.001, 5.0),
-            "age_gyr": Uniform(0.005, 12.0),
+            "age_frac": Uniform(0.005 / _AGE_Z_GYR, 12.0 / _AGE_Z_GYR),
             "log_total_mass": Fixed(10.0),
             "all_params": Fixed(DEFAULT),
         },
         dust_attenuation=dust,
         neb={"type": "none"},
-        redshift=Fixed(0.05),
+        redshift=Fixed(_SYNTH_Z),
     )
 
 
@@ -174,7 +180,7 @@ def test_grouped_matches_per_node_under_vmap(synthetic_ssp_wide, synthetic_topha
     """
     m0 = _synthetic_model(synthetic_ssp_wide, synthetic_tophat_obs, 0.3, "per_node")
     m1 = _synthetic_model(synthetic_ssp_wide, synthetic_tophat_obs, 0.3, "grouped")
-    pts = [*_SYNTH_POINTS, dict(_SYNTH_POINTS[1], sfh_delayed_age_gyr=0.03, dust_tau_bc=0.2)]
+    pts = [*_SYNTH_POINTS, dict(_SYNTH_POINTS[1], sfh_delayed_age_frac=0.03 / _AGE_Z_GYR, dust_tau_bc=0.2)]
     batch = {k: jnp.asarray([p[k] for p in pts], jnp.float64) for k in pts[0]}
 
     def batched(model):
@@ -262,7 +268,7 @@ def test_age_mixture_refuses_unknown_value_and_other_dust_types(
                 "all_params": Fixed(DEFAULT),
             },
             neb={"type": "none"},
-            redshift=Fixed(0.05),
+            redshift=Fixed(_SYNTH_Z),
         )
 
 
@@ -348,12 +354,14 @@ def prediction_hash(model, p) -> str:
 
 
 #: ``prediction_hash`` of the per_node (default) model at its first prior draw, recorded
-#: at upstream 068ef54a1 (before ``age_mixture`` existed) on XLA CPU (macOS arm64),
-#: float64, jax 0.11.2. Bit-level, so only checked where it was recorded: another XLA
+#: at upstream 77f4f94b6 (pure upstream, before ``age_mixture`` existed there) on XLA CPU
+#: (macOS arm64), float64, jax 0.11.2. First recorded at 068ef54a1; re-captured on the
+#: rebase to 77f4f94b6, whose upstream changes (#2948 Cue LyC from all ages, #2954 SFH
+#: timing fractions) move the default model's prediction. Bit-level, so only checked where it was recorded: another XLA
 #: backend or version may legitimately reorder a sum.
 _PER_NODE_HASH_AT_BASE = {
-    False: "a1559e6ca28b7c8242d38a2e8b939cce32883f9ca3ccf37b8eb428169f309b6b",
-    True: "0b0bd3b86f81cb802a04b025c0dfd0f4bc2f9b9fbdd5ca573bcaccebc17ce66a",
+    False: "12e19042a10325b7fd303d478ec9d9d29bfed5599bffbc58dbe238ea9d77d3c8",
+    True: "1d1f01416f91dbcc5374c5359cc5cb4c868916200dedf9530bc3099b52c0d37d",
 }
 _HASH_PLATFORM = ("cpu", "0.11.2")
 
@@ -378,7 +386,7 @@ def test_grouped_matches_per_node_cue_joint(ssp_data_fsps, lyc_fesc):
 @pytest.mark.regression_bug
 @pytest.mark.parametrize("lyc_fesc", [False, True])
 def test_per_node_prediction_unchanged_from_base(ssp_data_fsps, lyc_fesc):
-    """The default path is the pre-switch code: same bits as upstream 068ef54a1 (CPU, float64)."""
+    """The default path is the pre-switch code: same bits as upstream 77f4f94b6 (CPU, float64)."""
     if (jax.default_backend(), jax.__version__) != _HASH_PLATFORM:
         pytest.skip(f"base fingerprint recorded on XLA {_HASH_PLATFORM} only")
     m = _cue_model(ssp_data_fsps, None, lyc_fesc)
