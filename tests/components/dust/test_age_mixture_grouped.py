@@ -357,11 +357,13 @@ def prediction_hash(model, p) -> str:
 #: at upstream 77f4f94b6 (pure upstream, before ``age_mixture`` existed there) on XLA CPU
 #: (macOS arm64), float64, jax 0.11.2. First recorded at 068ef54a1; re-captured on the
 #: rebase to 77f4f94b6, whose upstream changes (#2948 Cue LyC from all ages, #2954 SFH
-#: timing fractions) move the default model's prediction. Bit-level, so only checked where it was recorded: another XLA
-#: backend or version may legitimately reorder a sum.
+#: timing fractions) move the default model's prediction. Re-captured again with the
+#: #3038 fix, which gives this model's custom ladder its own integrand knots (without the
+#: fix the previous 12e19042... / 1d1f0141... still reproduce). Bit-level, so only checked
+#: where it was recorded: another XLA backend or version may legitimately reorder a sum.
 _PER_NODE_HASH_AT_BASE = {
-    False: "12e19042a10325b7fd303d478ec9d9d29bfed5599bffbc58dbe238ea9d77d3c8",
-    True: "1d1f01416f91dbcc5374c5359cc5cb4c868916200dedf9530bc3099b52c0d37d",
+    False: "611993fbfb651efc688eba80d658b34c0d0d7739bb9d7d196aaadabe0963dfe7",
+    True: "501f68075a7ebea075c7e673602965e38d1752f2aea9c27eba5beff5aaade538",
 }
 _HASH_PLATFORM = ("cpu", "0.11.2")
 
