@@ -2022,7 +2022,22 @@ def nebular_subband_decomposition(packed, redshift, table):
     else:
         f2 = jax.lax.dynamic_slice_in_dim(frac_t, i, 2, axis=0)
         l2 = jax.lax.dynamic_slice_in_dim(lam_t, i, 2, axis=0)
-        frac = (1.0 - w) * f2[0] + w * f2[1]
+        # Chunk fractions are a partition of the band. Past the table the edge cell's
+        # line can drive one negative, so there (only) floor at zero and renormalize;
+        # inside the table the convex blend is already a partition and is untouched.
+        linear = (1.0 - w) * f2[0] + w * f2[1]
+        # The 0.0 floor is a physical non-negativity floor on a partition weight. Its
+        # result is used only where ``beyond`` (w outside [0, 1]) holds. Inside the
+        # table ``linear`` is a convex blend of non-negative fractions, so it is >= 0
+        # and the floor is never selected (tests/regression/bug/
+        # test_bug_3042_nebular_z_extrapolation_positive.py checks 9 redshifts across
+        # the table against the plain blend). Past the table it binds only when the
+        # edge cell's line drives a chunk below zero, which no positive extrapolation
+        # can: the chunks that stay positive are returned unchanged up to renormalizing.
+        floored = jnp.maximum(linear, 0.0)
+        total = jnp.sum(floored, axis=-1, keepdims=True)
+        beyond = ((w < 0.0) | (w > 1.0)) & (total > 0.0)
+        frac = jnp.where(beyond, floored / jnp.where(total > 0.0, total, 1.0), linear)
         lam_c = (1.0 - w) * l2[0] + w * l2[1]
     n_filt = cont.shape[0]
     # Each line is spread over its rendered profile: a few points weighted by the
